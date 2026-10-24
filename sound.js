@@ -1,30 +1,3 @@
-window.safeStorage = {
-  get(key, fallback = null) {
-    try {
-      const val = window.localStorage.getItem(key);
-      return val !== null ? val : fallback;
-    } catch (err) { return fallback; }
-  },
-  set(key, value) {
-    try { window.localStorage.setItem(key, String(value)); } catch (err) {}
-  },
-  getJSON(key, fallback) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch (err) { return fallback; }
-  },
-  setJSON(key, value) {
-    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (err) {}
-  },
-  remove(key) {
-    try { window.localStorage.removeItem(key); } catch (err) {}
-  },
-  clearKeys(keys) {
-    keys.forEach(k => this.remove(k));
-  }
-};
-
 class SpatialSoundEngine {
   constructor() {
     this.ctx = null;
@@ -142,4 +115,6 @@ class SpatialSoundEngine {
     if (this.subDrone) { try { this.subDrone.stop(); } catch(e){} this.subDrone = null; }
   }
 }
-window.sound = new SpatialSoundEngine();
+
+
+const sound = new SpatialSoundEngine();
