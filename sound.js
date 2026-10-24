@@ -116,5 +116,4 @@ class SpatialSoundEngine {
   }
 }
 
-
-const sound = new SpatialSoundEngine();
+var sound = new SpatialSoundEngine();
