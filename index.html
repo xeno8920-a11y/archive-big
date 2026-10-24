@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>АРХИВЫ Б.И.Г. // ТЕРМИНАЛ 44.1</title>
   
-  <!-- Кастомная иконка: Монитор с красным глазом Смотрителя, нарисованная кодом -->
+  <!-- Кастомная иконка -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='10' y='15' width='80' height='60' rx='8' fill='%23131310' stroke='%23b8a666' stroke-width='6'/%3E%3Cline x1='10' y1='35' x2='90' y2='35' stroke='%23b8a666' stroke-width='4'/%3E%3Ccircle cx='50' cy='55' r='10' fill='%23131310'/%3E%3Ccircle cx='50' cy='55' r='6' fill='%23ff3b56'/%3E%3Cpath d='M40 75 L30 90 L70 90 L60 75' fill='%23b8a666'/%3E%3C/svg%3E" />
 
-  <!-- Подключаем наш файл со стилями -->
+  <!-- Стили -->
   <link rel="stylesheet" href="style.css" />
 
   <!-- React и Babel -->
@@ -19,7 +19,13 @@
 <body>
   <div id="root"></div>
 
-  <!-- Подключаем наш файл с логикой игры -->
+  <!-- 1. Звуковой движок -->
+  <script src="sound.js"></script>
+  
+  <!-- 2. Данные и уровни (LEVELS) -->
+  <script src="data.js"></script>
+  
+  <!-- 3. Логика React -->
   <script type="text/babel" src="app.jsx"></script>
 </body>
 </html>
