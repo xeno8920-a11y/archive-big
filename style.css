@@ -51,13 +51,7 @@ body {
 .ambient-silhouette { position: fixed; bottom: -20px; right: 4%; font-size: 14vw; color: rgba(255,255,255,0.018); z-index: 2; pointer-events: none; user-select: none; }
 
 .custom-cursor-dot {
-  position: fixed; width: 12px; height: 12px; border: 1px solid var(--accent);
-  border-radius: 50%; pointer-events: none; z-index: 100000;
-  transform: translate(-50%, -50%); transition: width 0.15s, height 0.15s, border-color 0.15s;
-}
-.custom-cursor-dot.cursor-hover {
-  width: 24px; height: 24px; border-color: var(--uv-glow);
-  background: rgba(0, 245, 212, 0.08); box-shadow: 0 0 10px var(--uv-glow);
+  display: none !important;
 }
 
 .overlay { position: fixed; inset: 0; pointer-events: none; z-index: 9000; }
