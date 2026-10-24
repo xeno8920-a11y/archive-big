@@ -1,6 +1,33 @@
 const { useState, useEffect, useRef } = React;
 
-const { safeStorage, sound, ENDINGS_CATALOG, SECRET_DOCS_META, CLUE_TOKENS, LEVELS } = window;
+const safeStorage = {
+  get(key, fallback = null) {
+    try {
+      const val = window.localStorage.getItem(key);
+      return val !== null ? val : fallback;
+    } catch (err) {
+      return fallback;
+    }
+  },
+  set(key, value) {
+    try { window.localStorage.setItem(key, String(value)); } catch (err) {}
+  },
+  getJSON(key, fallback) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (err) { return fallback; }
+  },
+  setJSON(key, value) {
+    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (err) {}
+  },
+  remove(key) {
+    try { window.localStorage.removeItem(key); } catch (err) {}
+  },
+  clearKeys(keys) {
+    keys.forEach(k => this.remove(k));
+  }
+};
 
 function HotspotItemGraphic({ icon, x, y, stepProgress = 0 }) {
   const rotationAngle = stepProgress * 120;
@@ -303,3 +330,1792 @@ function LevelIllustration({ levelId, hotspots = [], explored = [], puzzleSteps 
           </g>
         );
       default: return null;
+    }
+  };
+
+  return (
+    <svg viewBox="0 0 800 500" preserveAspectRatio="xMidYMid slice">
+      <g className="base-artwork">{renderArtwork()}</g>
+      {!isThumbnail && uvMode && <UVSecretLayer levelId={levelId} />}
+      {!isThumbnail && hotspots.map((h) => {
+        const isDone = explored.includes(h.id);
+        const isFloating = levelId === 'lvl-2';
+        const stepCount = puzzleSteps[h.id] || 0;
+        return (
+          <g
+            key={h.id}
+            className={`svg-item-hotspot ${isDone ? 'explored' : ''} ${h.trap ? 'trap-spot' : ''} ${isFloating ? 'hotspot-float' : ''}`}
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const panX = ((rect.left + rect.width / 2) / window.innerWidth) * 2 - 1;
+              onSelectHotspot && onSelectHotspot(h, panX);
+            }}
+          >
+            <title>{h.label}</title>
+            <HotspotItemGraphic icon={h.icon} x={h.x} y={h.y} stepProgress={stepCount} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function MainMenuBackdrop() {
+  return (
+    <svg className="hero-svg-bg" viewBox="0 0 900 700" preserveAspectRatio="xMidYMid slice">
+      <defs><radialGradient id="mg" cx="50%" cy="45%" r="55%"><stop offset="0%" stopColor="#38331c"/><stop offset="60%" stopColor="#14130c"/><stop offset="100%" stopColor="#080806"/></radialGradient></defs>
+      <rect width="900" height="700" fill="url(#mg)"/>
+      <line x1="0" y1="0" x2="450" y2="320" stroke="#2e2a18" strokeWidth="2"/><line x1="900" y1="0" x2="450" y2="320" stroke="#2e2a18" strokeWidth="2"/>
+      <line x1="0" y1="700" x2="450" y2="320" stroke="#2e2a18" strokeWidth="2"/><line x1="900" y1="700" x2="450" y2="320" stroke="#2e2a18" strokeWidth="2"/>
+      {[1, 2, 3, 4, 5].map(step => (<rect key={step} x={450 - step * 70} y={320 - step * 52} width={step * 140} height={step * 104} fill="none" stroke="#6b6138" strokeWidth="1.5" opacity={0.45 / (step * 0.4)}/>))}
+      <rect x="432" y="285" width="36" height="70" fill="#e6d895" opacity="0.85"/>
+    </svg>
+  );
+}
+
+function App() {
+  const [screen, setScreen] = useState('main');
+  const [trapPhase, setTrapPhase] = useState(0);
+  const [currentLevelId, setCurrentLevelId] = useState(null);
+
+  const [whiteFlash, setWhiteFlash] = useState(false);
+  const [bsodCrash, setBsodCrash] = useState(false);
+  const [surrenderConfirm, setSurrenderConfirm] = useState(false);
+  const [uvMode, setUvMode] = useState(false);
+  const [systemOverlayMsg, setSystemOverlayMsg] = useState(null);
+
+  const [puzzleSteps, setPuzzleSteps] = useState({});
+
+  const [cursorPos, setCursorPos] = useState({ x: -100, y: -100 });
+  const [cursorHover, setCursorHover] = useState(false);
+
+  const subtitleTimerRef = useRef(null);
+  const glitchTimerRef = useRef(null);
+  const boardCanvasRef = useRef(null);
+
+  const [boardOpen, setBoardOpen] = useState(false);
+  const [boardNodes, setBoardNodes] = useState([
+    { id: 'b_doc1', title: 'Док-01: Затопленный архив', text: 'Архитектурный свод держат 4 колонны.', x: 40, y: 50, isNote: false },
+    { id: 'b_doc2', title: 'Док-02: Паркинг', text: 'Аномальный седан №8 заглох у колонны.', x: 300, y: 60, isNote: false },
+    { id: 'b_doc3', title: 'Док-03: Директива Смотрителя', text: 'Код 133 отвлечёт внимание. Выход — дверь #1.', x: 560, y: 70, isNote: false }
+  ]);
+  const [boardLinks, setBoardLinks] = useState([]);
+  const [linkingFromId, setLinkingFromId] = useState(null);
+  const [draggingNodeId, setDraggingNodeId] = useState(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+
+  const [cliOpen, setCliOpen] = useState(false);
+  const [cliInput, setCliInput] = useState('');
+  const [cliHistory, setCliHistory] = useState([
+    'АРХИВ Б.И.Г. // СИСТЕМНАЯ КОНСОЛЬ v44.1',
+    'Введите "help" для списка доступных команд.'
+  ]);
+
+  const [adminModeUnlocked, setAdminModeUnlocked] = useState(() => safeStorage.get('backrooms_admin_mode') === 'true');
+  const [hasAdminKey, setHasAdminKey] = useState(() => safeStorage.get('backrooms_admin_key') === 'true');
+  const [coreConsoleModalOpen, setCoreConsoleModalOpen] = useState(false);
+  const [debugModalOpen, setDebugModalOpen] = useState(false);
+
+  const [extractedClues, setExtractedClues] = useState(() => safeStorage.getJSON('backrooms_clues', []));
+  const [pinSlots, setPinSlots] = useState(['', '', '']);
+  const [activeSlotIdx, setActiveSlotIdx] = useState(0);
+
+  const [unlockedEndings, setUnlockedEndings] = useState(() => safeStorage.getJSON('backrooms_endings', []));
+  const [dossierModalOpen, setDossierModalOpen] = useState(false);
+
+  const [codeModalOpen, setCodeModalOpen] = useState(false);
+  const [codeInput, setCodeInput] = useState('');
+  const [codeError, setCodeError] = useState('');
+
+  const [savedLevelId, setSavedLevelId] = useState(() => safeStorage.get('backrooms_saved_level', null));
+  const [exploredMap, setExploredMap] = useState(() => safeStorage.getJSON('backrooms_explored', {}));
+  const [inventoryDocs, setInventoryDocs] = useState(() => safeStorage.getJSON('backrooms_docs', []));
+  const [diaryEntries, setDiaryEntries] = useState(() =>
+    safeStorage.getJSON('backrooms_diary', [
+      { id: 'init', title: 'Инициализация субъекта', text: 'Я очнулся в буферном секторе комплекса Б.И.Г. За мной ведётся наблюдение через терминал 44.1.' }
+    ])
+  );
+
+  const [activeReport, setActiveReport] = useState(null);
+  const [readingDoc, setReadingDoc] = useState(null);
+  const [inventoryModalOpen, setInventoryModalOpen] = useState(false);
+  const [diaryModalOpen, setDiaryModalOpen] = useState(false);
+  const [endingData, setEndingData] = useState(null);
+
+  const [brightness, setBrightness] = useState(1);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  const [reducedEffects, setReducedEffects] = useState(false);
+  const [subtitleText, setSubtitleText] = useState('');
+  const [terminalNote, setTerminalNote] = useState('ПРОТОКОЛ НАДЗОРА Б.И.Г. // ТЕРМИНАЛ 44.1 АКТИВЕН');
+  const [glitchHeader, setGlitchHeader] = useState('ТЕРМИНАЛ 44.1');
+  const [ambientTint, setAmbientTint] = useState('rgba(0,0,0,0)');
+  const [silhouette, setSilhouette] = useState('');
+
+  const currentLevel = LEVELS.find(l => l.id === currentLevelId);
+
+  const triggerSubtitle = (text) => {
+    if (!subtitlesEnabled) return;
+    if (subtitleTimerRef.current) {
+      clearTimeout(subtitleTimerRef.current);
+    }
+    setSubtitleText(text);
+    subtitleTimerRef.current = setTimeout(() => {
+      setSubtitleText('');
+      subtitleTimerRef.current = null;
+    }, 4200);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
+      if (glitchTimerRef.current) clearTimeout(glitchTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => { setSurrenderConfirm(false); }, [screen, currentLevelId]);
+  useEffect(() => { document.documentElement.style.setProperty('--brightness', brightness); }, [brightness]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        const scaryTitles = [
+          'НЕ ОСТАВЛЯЙ МЕНЯ ЗДЕСЬ',
+          'СМОТРИТЕЛЬ ВИДИТ, ЧТО ТЫ УШЁЛ',
+          'ВЕРНИСЬ К ТЕРМИНАЛУ 44.1',
+          'Б.И.Г. ФИКСИРУЕТ ПОТЕРЮ ФОКУСА'
+        ];
+        document.title = scaryTitles[Math.floor(Math.random() * scaryTitles.length)];
+      } else {
+        document.title = 'АРХИВЫ Б.И.Г. // ТЕРМИНАЛ 44.1';
+        sound.playMicClick();
+        triggerSubtitle('[Смотритель возобновил аудиофиксацию сессии]');
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [subtitlesEnabled]);
+
+  useEffect(() => {
+    const handleMouseMove = (e) => setCursorPos({ x: e.clientX, y: e.clientY });
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const activeEl = document.activeElement;
+      const isTyping = activeEl && (
+        activeEl.tagName === 'INPUT' ||
+        activeEl.tagName === 'TEXTAREA' ||
+        activeEl.isContentEditable
+      );
+
+      if (e.key === 'Escape') {
+        if (boardOpen) setBoardOpen(false);
+        else if (cliOpen) setCliOpen(false);
+        else if (debugModalOpen) setDebugModalOpen(false);
+        else if (readingDoc) setReadingDoc(null);
+        else if (inventoryModalOpen) setInventoryModalOpen(false);
+        else if (diaryModalOpen) setDiaryModalOpen(false);
+        else if (dossierModalOpen) setDossierModalOpen(false);
+        else if (codeModalOpen) setCodeModalOpen(false);
+        else if (coreConsoleModalOpen) setCoreConsoleModalOpen(false);
+        return;
+      }
+
+      if (isTyping) return;
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        sound.playSpatialClick(660);
+        setBoardOpen(prev => !prev);
+        return;
+      }
+      if (e.key === '`' || e.key === '~' || e.key === 'ё' || e.key === 'Ё') {
+        e.preventDefault();
+        sound.playSpatialClick(700);
+        setCliOpen(prev => !prev);
+        return;
+      }
+      if (e.key === 'F2') {
+        e.preventDefault();
+        sound.playSpatialClick(800);
+        setDebugModalOpen(prev => !prev);
+        return;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [boardOpen, cliOpen, debugModalOpen, readingDoc, inventoryModalOpen, diaryModalOpen, dossierModalOpen, codeModalOpen, coreConsoleModalOpen]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const notes = [
+        'ПРОТОКОЛ НАДЗОРА Б.И.Г. // ТЕРМИНАЛ 44.1 АКТИВЕН',
+        'СВОДКА: НАЖМИТЕ [TAB] ДЛЯ ОТКРЫТИЯ ДОСКИ РАССЛЕДОВАНИЯ С НИТЯМИ',
+        'СОВЕТ: НАЖМИТЕ [`] ДЛЯ ВЫЗОВА КОМАНДНОЙ СТРОКИ ТЕРМИНАЛА Б.И.Г.',
+        'АРХИВНАЯ СПРАВКА: ОТКРОЙТЕ ВСЕ 7 КОНЦОВОК В ДОСЬЕ СУБЪЕКТА'
+      ];
+      setTerminalNote(notes[Math.floor(Math.random() * notes.length)]);
+      if (Math.random() > 0.75) {
+        setGlitchHeader('Б.И.Г. НАДЗОР');
+        if (glitchTimerRef.current) clearTimeout(glitchTimerRef.current);
+        glitchTimerRef.current = setTimeout(() => {
+          setGlitchHeader('ТЕРМИНАЛ 44.1');
+          glitchTimerRef.current = null;
+        }, 360);
+      }
+    }, 6000);
+    return () => {
+      clearInterval(timer);
+      if (glitchTimerRef.current) clearTimeout(glitchTimerRef.current);
+    };
+  }, []);
+
+  const addDiaryLog = (key, title, text) => {
+    setDiaryEntries(prev => {
+      if (key && prev.some(item => item.id === key)) return prev;
+      const next = [{ id: key || String(Date.now() + Math.random()), title, text }, ...prev];
+      safeStorage.setJSON('backrooms_diary', next);
+      return next;
+    });
+  };
+
+  const registerUnlockedEnding = (endingId) => {
+    setUnlockedEndings(prev => {
+      if (prev.includes(endingId)) return prev;
+      const next = [...prev, endingId];
+      safeStorage.setJSON('backrooms_endings', next);
+      return next;
+    });
+  };
+
+  const handleCliSubmit = (e) => {
+    e.preventDefault();
+    const cmd = cliInput.trim().toLowerCase();
+    if (!cmd) return;
+    const newHistory = [...cliHistory, `> ${cliInput}`];
+
+    if (cmd === 'help') {
+      newHistory.push(
+        'ДОСТУПНЫЕ КОМАНДЫ ТЕРМИНАЛА Б.И.Г.:',
+        '  scan       - глубокий спектральный анализ текущего сектора',
+        '  cat doc-X  - вывести исходный текст документа (cat doc-1 .. cat doc-4)',
+        '  ping 44.1  - проверить канал связи с постом Смотрителя #44',
+        '  status     - сводка прогресса расследования и допусков',
+        '  override   - принудительный тест видеобуфера',
+        '  clear      - очистить консоль'
+      );
+    } else if (cmd === 'scan') {
+      sound.playAnomalyStinger();
+      newHistory.push(
+        `[SCAN]: Локация: ${currentLevel ? currentLevel.title : 'Главный буфер'}`,
+        `[SCAN]: Частота: 44.1 kHz. Обнаружены скрытые флуоресцентные метки (включите УФ-спектр 365 нм).`
+      );
+    } else if (cmd.startsWith('cat doc-')) {
+      const docNum = cmd.replace('cat doc-', '');
+      const dKey = `doc${docNum}`;
+      if (SECRET_DOCS_META[dKey]) {
+        newHistory.push(
+          `=== ${SECRET_DOCS_META[dKey].code} (${SECRET_DOCS_META[dKey].title}) ===`,
+          SECRET_DOCS_META[dKey].content,
+          `// ПРИМЕЧАНИЕ: ${SECRET_DOCS_META[dKey].cipherFragment}`
+        );
+      } else {
+        newHistory.push(`[ОШИБКА]: Документ ${dKey} не найден.`);
+      }
+    } else if (cmd === 'ping 44.1') {
+      sound.playSpatialClick(300);
+      newHistory.push(
+        'PING 44.1 (smotritel_node_44): 56 data bytes',
+        '64 bytes from 44.1: icmp_seq=1 ttl=44 time=0.44 ms',
+        'ОТВЕТ УЗЛА: «Субъект пытается пинговать пост надзора. Продолжайте наблюдение».'
+      );
+    } else if (cmd === 'status') {
+      newHistory.push(
+        `Собрано документов Б.И.Г.: ${inventoryDocs.length}/4`,
+        `Выписано зацепок в блокнот: ${extractedClues.length}/4`,
+        `Штампов концовок в Досье: ${unlockedEndings.length}/7`,
+        `Root-доступ Администратора: ${adminModeUnlocked ? 'АКТИВЕН' : 'НЕТ'}`
+      );
+    } else if (cmd === 'override') {
+      setBsodCrash(true);
+      sound.playAnomalyStinger();
+      setTimeout(() => setBsodCrash(false), 2400);
+      newHistory.push('// СБОЙ ВИДЕОДРАЙВЕРА 0x00000044. СЕССИЯ ВОССТАНОВЛЕНА.');
+    } else if (cmd === 'clear') {
+      setCliHistory(['АРХИВ Б.И.Г. // СИСТЕМНАЯ КОНСОЛЬ v44.1']);
+      setCliInput('');
+      return;
+    } else {
+      newHistory.push(`[ОШИБКА]: Неизвестная команда "${cmd}". Введите "help".`);
+    }
+
+    setCliHistory(newHistory);
+    setCliInput('');
+  };
+
+  const handleBoardMouseDown = (e, nodeId) => {
+    const node = boardNodes.find(n => n.id === nodeId);
+    if (!node || !boardCanvasRef.current) return;
+    const rect = boardCanvasRef.current.getBoundingClientRect();
+    const localClickX = e.clientX - rect.left;
+    const localClickY = e.clientY - rect.top;
+    setDraggingNodeId(nodeId);
+    setDragOffset({ x: localClickX - node.x, y: localClickY - node.y });
+  };
+
+  const handleBoardMouseMove = (e) => {
+    if (!draggingNodeId || !boardCanvasRef.current) return;
+    const rect = boardCanvasRef.current.getBoundingClientRect();
+    const localMouseX = e.clientX - rect.left;
+    const localMouseY = e.clientY - rect.top;
+    const maxX = Math.max(20, rect.width - 240);
+    const maxY = Math.max(20, rect.height - 130);
+
+    setBoardNodes(prev => prev.map(n => {
+      if (n.id === draggingNodeId) {
+        return {
+          ...n,
+          x: Math.max(10, Math.min(maxX, localMouseX - dragOffset.x)),
+          y: Math.max(10, Math.min(maxY, localMouseY - dragOffset.y))
+        };
+      }
+      return n;
+    }));
+  };
+
+  const handleBoardMouseUp = () => setDraggingNodeId(null);
+
+  const handleConnectBoardNode = (nodeId) => {
+    if (!linkingFromId) {
+      setLinkingFromId(nodeId);
+      sound.playSpatialClick(600);
+      triggerSubtitle('[Выберите вторую карточку на доске, чтобы протянуть красную нить]');
+    } else if (linkingFromId === nodeId) {
+      setLinkingFromId(null);
+    } else {
+      setBoardLinks(prev => [...prev, { from: linkingFromId, to: nodeId }]);
+      setLinkingFromId(null);
+      sound.playSpatialClick(800);
+      triggerSubtitle('[Красная нить связи натянута]');
+    }
+  };
+
+  const handleAddBoardNote = () => {
+    const text = prompt('Введите текст заметки следователя для Доски улик:');
+    if (!text) return;
+    const newId = `note_${Date.now()}`;
+    setBoardNodes(prev => [...prev, { id: newId, title: 'Заметка следователя', text, x: 220, y: 210, isNote: true }]);
+    sound.playSpatialClick(720);
+  };
+
+  const extractClueFromDoc = (clueKey) => {
+    sound.playSpatialClick(760);
+    const token = CLUE_TOKENS[clueKey];
+    if (!token) return;
+    if (!extractedClues.includes(clueKey)) {
+      const next = [...extractedClues, clueKey];
+      setExtractedClues(next);
+      safeStorage.setJSON('backrooms_clues', next);
+      addDiaryLog(`clue-${clueKey}`, `Выписана зацепка: ${token.label}`, `В Блокнот дешифровки занесено значение «${token.digit}».`);
+    }
+    triggerSubtitle(`[Зацепка занесена в Блокнот дешифровки: ${token.label}]`);
+  };
+
+  const applyClueToDecoder = (clueKey) => {
+    sound.playSpatialClick(680);
+    const token = CLUE_TOKENS[clueKey];
+    if (!token) return;
+    if (token.digit === '133') {
+      setPinSlots(['1', '3', '3']); setCodeInput('133'); setCodeError(''); return;
+    }
+    const nextSlots = [...pinSlots];
+    nextSlots[activeSlotIdx] = token.digit;
+    setPinSlots(nextSlots);
+    setActiveSlotIdx((activeSlotIdx + 1) % 3);
+    setCodeInput(nextSlots.join(''));
+    setCodeError('');
+  };
+
+  const handleDebugUnlockAllSectors = () => {
+    sound.playSpatialClick(820);
+    const fullMap = {};
+    LEVELS.forEach(lvl => {
+      if (!lvl.hiddenUntilUnlocked) {
+        fullMap[lvl.id] = lvl.hotspots.filter(h => !h.trap).map(h => h.id);
+      }
+    });
+    setExploredMap(fullMap);
+    setAdminModeUnlocked(true);
+    setHasAdminKey(true);
+    safeStorage.setJSON('backrooms_explored', fullMap);
+    safeStorage.set('backrooms_admin_mode', 'true');
+    safeStorage.set('backrooms_admin_key', 'true');
+    triggerSubtitle('[DEBUG: Все сектора (включая 10 и 11) и Ключ Администратора разблокированы]');
+  };
+
+  const handleDebugGrantAllDocs = () => {
+    sound.playSpatialClick(840);
+    const allDocs = ['doc1', 'doc2', 'doc3', 'doc4'];
+    const allClues = ['clue_4', 'clue_8', 'clue_1', 'clue_133'];
+    setInventoryDocs(allDocs);
+    setExtractedClues(allClues);
+    setHasAdminKey(true);
+    safeStorage.setJSON('backrooms_docs', allDocs);
+    safeStorage.setJSON('backrooms_clues', allClues);
+    safeStorage.set('backrooms_admin_key', 'true');
+    triggerSubtitle('[DEBUG: Выданы все документы (doc1–doc4), зацепки и Ключ Администратора]');
+  };
+
+  const handleDebugTeleport = (targetId) => {
+    setDebugModalOpen(false);
+    if (targetId === 'lvl-10' || targetId === 'lvl-11') {
+      setAdminModeUnlocked(true);
+      safeStorage.set('backrooms_admin_mode', 'true');
+    }
+    openLevel(targetId, true);
+    triggerSubtitle(`[DEBUG: Выполнен прямой телепорт в ${targetId}]`);
+  };
+
+  const resetProgress = (startImmediately = false) => {
+    sound.stopAll();
+    setSurrenderConfirm(false);
+    setCodeModalOpen(false);
+    setCoreConsoleModalOpen(false);
+    setDebugModalOpen(false);
+    setSystemOverlayMsg(null);
+    setCodeInput('');
+    setCodeError('');
+    setPinSlots(['', '', '']);
+    setActiveSlotIdx(0);
+    setUvMode(false);
+    setPuzzleSteps({});
+
+    safeStorage.clearKeys([
+      'backrooms_saved_level',
+      'backrooms_explored',
+      'backrooms_docs',
+      'backrooms_diary',
+      'backrooms_clues',
+      'backrooms_admin_mode',
+      'backrooms_admin_key'
+    ]);
+
+    const initialDiary = [{ id: 'init', title: 'Инициализация субъекта', text: 'Я очнулся в буферном секторе комплекса Б.И.Г. За мной ведётся наблюдение через терминал 44.1.' }];
+    safeStorage.setJSON('backrooms_diary', initialDiary);
+
+    setSavedLevelId(null);
+    setExploredMap({});
+    setInventoryDocs([]);
+    setExtractedClues([]);
+    setAdminModeUnlocked(false);
+    setHasAdminKey(false);
+    setDiaryEntries(initialDiary);
+    setActiveReport(null);
+    setReadingDoc(null);
+    setInventoryModalOpen(false);
+    setDiaryModalOpen(false);
+    setEndingData(null);
+
+    if (startImmediately) {
+      openLevel('lvl-0', true);
+    } else {
+      setCurrentLevelId(null);
+      setScreen('main');
+      triggerSubtitle('[Текущая экспедиция сброшена (Штампы в Досье сохранены)]');
+    }
+  };
+
+  const isLevelUnlocked = (lvl) => {
+    if (lvl.id === 'lvl-0') return true;
+    if (lvl.id === 'lvl-9' || lvl.id === 'lvl-13') return false;
+    if (lvl.id === 'lvl-10') return adminModeUnlocked;
+    if (lvl.id === 'lvl-11') return adminModeUnlocked && isLevelFullyCleared(LEVELS.find(l => l.id === 'lvl-10'));
+    const prev = LEVELS.find(l => l.seq === lvl.seq - 1);
+    if (!prev) return true;
+    const req = prev.hotspots.filter(h => !h.trap).map(h => h.id);
+    const done = exploredMap[prev.id] || [];
+    return req.every(id => done.includes(id));
+  };
+
+  const isLevelFullyCleared = (lvl) => {
+    if (!lvl) return false;
+    const req = lvl.hotspots.filter(h => !h.trap).map(h => h.id);
+    const done = exploredMap[lvl.id] || [];
+    return req.every(id => done.includes(id));
+  };
+
+  const toggleSound = () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    sound.enabled = next;
+    if (next) {
+      sound.playSpatialClick(640);
+      if (screen === 'level' && currentLevelId) sound.startAmbient(currentLevelId);
+      triggerSubtitle('[Пространственный аудиомониторинг включён]');
+    } else {
+      sound.stopAll();
+      triggerSubtitle('[Аудиомониторинг отключён]');
+    }
+  };
+
+  const openLevel = (id, forceOpen = false) => {
+    const targetLvl = LEVELS.find(l => l.id === id);
+    if (!targetLvl || (!forceOpen && !isLevelUnlocked(targetLvl))) return;
+
+    setSurrenderConfirm(false);
+    sound.playSpatialClick(480);
+    setActiveReport(null);
+    setAmbientTint('rgba(0,0,0,0)');
+    setSilhouette('');
+
+    addDiaryLog(`visit-${id}`, `${targetLvl.number}: ${targetLvl.title}`, targetLvl.diaryEntry);
+
+    setCurrentLevelId(id);
+    if (id !== 'lvl-9' && id !== 'lvl-13') {
+      setSavedLevelId(id);
+      safeStorage.set('backrooms_saved_level', id);
+    }
+    setScreen('level');
+    sound.startAmbient(id);
+  };
+
+  const handleInspectHotspot = (hotspot, panX = 0) => {
+    if (currentLevelId === 'lvl-9' && hotspot.id === 'h9-end' && uvMode) {
+      sound.stopAmbient();
+      sound.playAnomalyStinger();
+      setSystemOverlayMsg('// СИСТЕМА ВЗЛОМАНА // ЗАГРУЗКА АДМИНИСТРАТИВНОГО МОДУЛЯ...');
+      setAdminModeUnlocked(true);
+      safeStorage.set('backrooms_admin_mode', 'true');
+      addDiaryLog('hack-sec09', 'Взлом тупика «The End» (REBOOT --OVERRIDE)', 'В ультрафиолете на страницах тома проявился эксплойт. Система перебросила меня в скрытый Сектор 10.');
+
+      setTimeout(() => {
+        setSystemOverlayMsg(null);
+        setUvMode(false);
+        openLevel('lvl-10', true);
+      }, 2000);
+      return;
+    }
+
+    if (currentLevelId === 'lvl-11' && hotspot.id === 'h11-console') {
+      if (!hasAdminKey) {
+        sound.playSpatialClick(260, panX);
+        setActiveReport({
+          label: hotspot.label,
+          report: 'ДОСТУП ОТКЛОНЁН: Требуется аппаратный «Ключ Администратора» из Сектора 10 (Чистилище данных).'
+        });
+        triggerSubtitle('[Нужен Ключ Администратора из Сектора 10!]');
+        return;
+      }
+      sound.playSpatialClick(820, panX);
+      setActiveReport(hotspot);
+      setCoreConsoleModalOpen(true);
+      return;
+    }
+
+    if (hotspot.trap) {
+      sound.playSpatialClick(220, panX);
+      setActiveReport(hotspot);
+      setExploredMap(prev => {
+        const updated = { ...prev, [currentLevelId]: [] };
+        safeStorage.setJSON('backrooms_explored', updated);
+        return updated;
+      });
+      triggerSubtitle('[СБОЙ СКАНЕРА: Донный сенсор Б.И.Г. сбросил калибровку Сектора 05!]');
+      return;
+    }
+
+    const currentList = exploredMap[currentLevelId] || [];
+    const isAlreadyExplored = currentList.includes(hotspot.id);
+    if (hotspot.interactiveSteps && !isAlreadyExplored) {
+      const nextStep = (puzzleSteps[hotspot.id] || 0) + 1;
+      setPuzzleSteps(prev => ({ ...prev, [hotspot.id]: nextStep }));
+      sound.playSpatialClick(420 + nextStep * 120, panX);
+      if (nextStep < hotspot.interactiveSteps) {
+        setActiveReport({
+          label: hotspot.label,
+          report: `Механизм поворачивается со скрипом (${nextStep}/${hotspot.interactiveSteps})... Нажмите ещё раз на сцене, чтобы докрутить до конца.`
+        });
+        triggerSubtitle(`[Поворот механизма: ${nextStep}/${hotspot.interactiveSteps}]`);
+        return;
+      }
+    }
+
+    const triggeredAudioScare = currentLevelId !== 'lvl-9' && currentLevelId !== 'lvl-13' && Math.random() < 0.25;
+    if (triggeredAudioScare) {
+      sound.playAnomalyStinger();
+    } else {
+      sound.playSpatialClick(720, panX);
+    }
+
+    setActiveReport(hotspot);
+
+    const isNewHotspot = !currentList.includes(hotspot.id);
+    if (isNewHotspot) {
+      const updatedMap = { ...exploredMap, [currentLevelId]: [...currentList, hotspot.id] };
+      setExploredMap(updatedMap);
+      safeStorage.setJSON('backrooms_explored', updatedMap);
+    }
+
+    if (hotspot.givesAdminKey) {
+      setHasAdminKey(true);
+      safeStorage.set('backrooms_admin_key', 'true');
+      addDiaryLog('admin-key', 'Найден Ключ Администратора', 'В Секторе 10 получен root-ключ для центральной консоли Ядра Б.И.Г.');
+      triggerSubtitle('[ПОЛУЧЕН КЛЮЧ АДМИНИСТРАТОРА Б.И.Г.!]');
+    }
+
+    if (hotspot.givesDoc && !inventoryDocs.includes(hotspot.givesDoc)) {
+      const nextDocs = [...inventoryDocs, hotspot.givesDoc];
+      setInventoryDocs(nextDocs);
+      safeStorage.setJSON('backrooms_docs', nextDocs);
+      const docMeta = SECRET_DOCS_META[hotspot.givesDoc];
+      addDiaryLog(`doc-${hotspot.givesDoc}`, `Найдена запись ${docMeta.code}`, `Обнаружен документ Б.И.Г.: «${docMeta.title}».`);
+      triggerSubtitle(`[В ИНВЕНТАРЬ ДОБАВЛЕНА ЗАПИСЬ: ${docMeta.code}]`);
+      openDocumentReader(docMeta);
+    } else if (triggeredAudioScare) {
+      triggerSubtitle('Вы слышите резкий скрежет за спиной. Но там никого нет.');
+    } else {
+      triggerSubtitle(`[Вы заметили: ${hotspot.label}]`);
+    }
+  };
+
+  const openDocumentReader = (docMeta) => {
+    sound.playSpatialClick(620);
+    addDiaryLog(`read-${docMeta.id}`, `Изучен документ ${docMeta.code}`, `Заметка расследования: ${docMeta.note}`);
+    setReadingDoc(docMeta);
+  };
+
+  const renderInteractiveDocContent = (docId) => {
+    const Chip = ({ word, clueKey }) => {
+      const isExtracted = extractedClues.includes(clueKey);
+      return (
+        <span
+          className={`interactive-word ${isExtracted ? 'extracted' : ''}`}
+          onClick={() => extractClueFromDoc(clueKey)}
+          title="Нажмите, чтобы выписать зацепку в Блокнот дешифровки"
+        >
+          {word} {isExtracted ? '✓' : '[+]'}
+        </span>
+      );
+    };
+
+    if (docId === 'doc1') {
+      return (
+        <>
+          «Сегодня обходил Затопленный Архив. Вода поднялась, но бетонные колонны держатся. Их всего{' '}
+          <Chip word="четыре" clueKey="clue_4" />, но они держат весь свод. А в Паркинге (Сектор 03) седан под номером{' '}
+          <Chip word="восемь" clueKey="clue_8" /> снова заглох. Смотритель сказал, что это не баг, а фича. Б.И.Г. довольна».
+        </>
+      );
+    }
+    if (docId === 'doc2') {
+      return (
+        <>
+          «Седан под номером <Chip word="восемь" clueKey="clue_8" /> снова заглох. Я оставил его на паркинге, но он перекатывается сам по себе. А в Архиве, где{' '}
+          <Chip word="четыре" clueKey="clue_4" /> колонны, вода сегодня особенно черная...»
+        </>
+      );
+    }
+    if (docId === 'doc3') {
+      return (
+        <>
+          «Приказываю: не допускать проникновения субъектов в Зал Торжеств. Если субъект нашел все три записи, он представляет угрозу. Настоящий код доступа —{' '}
+          <Chip word="133" clueKey="clue_133" />, это отвлечет его внимание. Истинный выход — за красной дверью, которая в протоколе идет{' '}
+          <Chip word="первой" clueKey="clue_1" />. Пусть думает, что это его выбор. P.S. Смотритель, не забудь стереть его память после. Б.И.Г. не нуждается в свидетелях».
+        </>
+      );
+    }
+    return SECRET_DOCS_META[docId]?.content || null;
+  };
+
+  const handleCodeSubmit = (e) => {
+    if (e) e.preventDefault();
+    const clean = codeInput.trim();
+    if (clean === '481') {
+      sound.playSpatialClick(880);
+      setCodeModalOpen(false);
+      setCodeError('');
+      addDiaryLog('code-481', 'Шлюз Сектора 08 взломан (Код 481)', 'Код 481 подошёл к замку.');
+      setScreen('doors');
+      return;
+    }
+    if (clean === '133') {
+      sound.playAnomalyStinger();
+      setCodeModalOpen(false);
+      setCodeError('');
+      setWhiteFlash(true);
+      setTimeout(() => setWhiteFlash(false), 220);
+      addDiaryLog('code-133-trap', 'Ловушка кода 133 («The End»)', 'Код 133 оказался приманкой Б.И.Г. Меня сбросило в тупиковый Сектор 09.');
+      openLevel('lvl-9', true);
+      return;
+    }
+    sound.playSpatialClick(240);
+    setCodeError('ДОСТУП ЗАПРЕЩЕН');
+  };
+
+  const handleLeftGreenDoorTrap = () => {
+    sound.stopAmbient();
+    registerUnlockedEnding('fun_trap');
+    setScreen('trap');
+    setTrapPhase(1);
+    setTimeout(() => setTrapPhase(2), 1800);
+    setTimeout(() => {
+      setTrapPhase(0);
+      setEndingData(ENDINGS_CATALOG.find(e => e.id === 'fun_trap'));
+      setScreen('ending');
+    }, 3500);
+  };
+
+  const handleRightRedDoorEscape = () => {
+    sound.stopAmbient();
+    sound.playSpatialClick(880);
+    registerUnlockedEnding('true_exit');
+    setEndingData(ENDINGS_CATALOG.find(e => e.id === 'true_exit'));
+    setScreen('ending');
+  };
+
+  const handleAdminShutdownEnding = () => {
+    setCoreConsoleModalOpen(false);
+    sound.stopAmbient();
+    sound.playSpatialClick(880);
+    registerUnlockedEnding('admin_shutdown');
+    setEndingData(ENDINGS_CATALOG.find(e => e.id === 'admin_shutdown'));
+    setScreen('ending');
+  };
+
+  const handleTriggerCoreOverreach = () => {
+    setCoreConsoleModalOpen(false);
+    sound.stopAmbient();
+    sound.playAnomalyStinger();
+    setSystemOverlayMsg('// КРИТИЧЕСКАЯ ОШИБКА: СУБЪЕКТ ПРЕВЫСИЛ ПОЛНОМОЧИЯ //');
+    addDiaryLog('core-overreach', 'Превышение полномочий в Ядре', 'Попытка вскрыть корневой архив вызвала блокировку. Меня сбросило в Сектор 13 («Пасть Архива»).');
+
+    setTimeout(() => {
+      setSystemOverlayMsg(null);
+      setUvMode(false);
+      openLevel('lvl-13', true);
+    }, 2000);
+  };
+
+  const handleDigestedEnding = () => {
+    sound.stopAmbient();
+    sound.playAnomalyStinger();
+    registerUnlockedEnding('digested');
+    setEndingData(ENDINGS_CATALOG.find(e => e.id === 'digested'));
+    setScreen('ending');
+  };
+
+  const handleAcceptFateInTheEnd = () => {
+    sound.stopAmbient();
+    sound.playSpatialClick(240);
+    registerUnlockedEnding('the_end');
+    setEndingData(ENDINGS_CATALOG.find(e => e.id === 'the_end'));
+    setScreen('ending');
+  };
+
+  const handlePassiveDisappearEnding = () => {
+    if (!surrenderConfirm) {
+      sound.playSpatialClick(340);
+      setSurrenderConfirm(true);
+      triggerSubtitle('[Нажмите ещё раз, если действительно хотите прекратить расследование]');
+      return;
+    }
+    setSurrenderConfirm(false);
+    sound.stopAmbient();
+    sound.playAnomalyStinger();
+    const endId = inventoryDocs.length === 0 ? 'parasite' : 'disappear';
+    registerUnlockedEnding(endId);
+    setEndingData(ENDINGS_CATALOG.find(e => e.id === endId));
+    setScreen('ending');
+  };
+
+  const visibleLevels = LEVELS.filter(l => !l.hiddenUntilUnlocked && (!l.adminSector || adminModeUnlocked));
+  const currentExplored = currentLevel ? (exploredMap[currentLevel.id] || []) : [];
+  const totalClearedCount = visibleLevels.filter(l => isLevelFullyCleared(l)).length;
+  const baseDocsCollected = ['doc1', 'doc2', 'doc3'].every(k => inventoryDocs.includes(k));
+  const isNoEscapeSector = currentLevel && (currentLevel.id === 'lvl-9' || currentLevel.id === 'lvl-13');
+  const docSlotKeys = adminModeUnlocked || inventoryDocs.includes('doc4') ? ['doc1', 'doc2', 'doc3', 'doc4'] : ['doc1', 'doc2', 'doc3'];
+
+  return (
+    <div
+      className={reducedEffects ? 'reduced-effects' : ''}
+      style={{ '--dynamic-tint': ambientTint }}
+      onMouseEnter={() => setCursorHover(true)}
+      onMouseLeave={() => setCursorHover(false)}
+    >
+      <div className="ambient-layer"></div>
+      <div className="ambient-silhouette">{silhouette}</div>
+      <div className="overlay vignette"></div>
+      <div className="overlay crt-lines"></div>
+      <div className="overlay noise"></div>
+
+      <div className={`custom-cursor-dot ${cursorHover ? 'cursor-hover' : ''}`} style={{ left: cursorPos.x, top: cursorPos.y }}></div>
+      {whiteFlash && <div className="white-flash-overlay"></div>}
+
+      {bsodCrash && (
+        <div className="bsod-crash-overlay">
+          <h1 style={{ color: '#ff4757', fontSize: '2.4rem' }}>*** STOP: 0x00000044 (KERNEL_SECURITY_CHECK_FAILURE)</h1>
+          <p>Система наблюдения Б.И.Г. зафиксировала попытку прямого аппаратного перехвата памяти.</p>
+          <p>Dumping physical memory to disk: 44.1% complete...</p>
+          <p style={{ color: '#ffd43b' }}>ПЕРЕЗАПУСК ВИДЕОДРАЙВЕРА ТЕРМИНАЛА...</p>
+        </div>
+      )}
+
+      {systemOverlayMsg && (
+        <div className="trap-phase-screen" style={{ backgroundColor: '#000000', color: '#ff4757', zIndex: 99999 }}>
+          <div style={{ fontSize: '0.82rem', letterSpacing: '4px', color: '#00f5d4', marginBottom: '14px' }}>
+            // SYSTEM OVERRIDE // KERNEL PANIC //
+          </div>
+          <h2 style={{ fontSize: '1.8rem', fontWeight: 'normal', letterSpacing: '3px', maxWidth: '760px', lineHeight: '1.5' }}>
+            {systemOverlayMsg}
+          </h2>
+        </div>
+      )}
+
+      <div className="topbar-wrapper">
+        <header className="topbar">
+          <div className="topbar-left">
+            <div className="brand-badge">
+              <span className="status-dot"></span>
+              <span>{glitchHeader}</span>
+            </div>
+            <div className="protocol-pill">// АРХИВ Б.И.Г. | НАДЗОР СМОТРИТЕЛЯ #44</div>
+            {adminModeUnlocked && (
+              <div className="admin-pill">[ROOT-ДОСТУП {hasAdminKey ? '+ КЛЮЧ ЯДРА' : 'АКТИВЕН'}]</div>
+            )}
+            <div className="terminal-log">{terminalNote}</div>
+          </div>
+
+          <div className="topbar-actions">
+            <button className="btn" style={{ borderColor: '#d9384a', color: '#ff8593' }} onClick={() => setBoardOpen(true)}>
+              📌 Доска улик [TAB]
+            </button>
+            <button className="btn" onClick={() => setDossierModalOpen(true)}>
+              Досье ({unlockedEndings.length}/7)
+            </button>
+            <button className="btn" onClick={() => setDiaryModalOpen(true)}>
+              Дневник ({diaryEntries.length})
+            </button>
+            <button className="btn" onClick={() => setInventoryModalOpen(true)}>
+              Документы ({inventoryDocs.length}/{docSlotKeys.length})
+            </button>
+            <button className="btn" onClick={toggleSound}>
+              {soundEnabled ? 'Звук: ВКЛ' : 'Звук: ВЫКЛ'}
+            </button>
+            {screen !== 'main' && !isNoEscapeSector && (
+              <button className="btn" onClick={() => { setSurrenderConfirm(false); sound.stopAmbient(); setScreen('main'); }}>
+                Меню
+              </button>
+            )}
+          </div>
+        </header>
+      </div>
+
+      {screen === 'main' && (
+        <main className="hero-screen">
+          <aside className="hero-sidebar">
+            <div>
+              <div className="game-kicker">Большая Исследовательская Группа (Б.И.Г.)</div>
+              <h1 className="game-title">АРХИВЫ ЗАКУЛИСЬЯ</h1>
+              <p className="game-tagline">
+                Нарративный квест-детектив. Используйте УФ-спектр для поиска тайных пометок, связывайте улики красными нитями на Доске [TAB], работайте через консоль [`] и соберите все 7 штампов в Досье субъекта.
+              </p>
+              <nav className="menu-nav">
+                <button className="menu-item" disabled={!savedLevelId} onClick={() => openLevel(savedLevelId)}>
+                  <span>Продолжить расследование</span>
+                  {savedLevelId && <span className="menu-item-meta">{LEVELS.find(l => l.id === savedLevelId)?.number}</span>}
+                </button>
+                <button className="menu-item" onClick={() => resetProgress(true)}>
+                  <span>Новая экспедиция</span><span className="menu-item-meta">Сектор 00</span>
+                </button>
+                <button className="menu-item" onClick={() => setScreen('archive')}>
+                  <span>Картотека секторов</span><span className="menu-item-meta">Изучено: {totalClearedCount}/{visibleLevels.length}</span>
+                </button>
+                <button className="menu-item" style={{ borderColor: '#d9384a', color: '#ffb3bd' }} onClick={() => setBoardOpen(true)}>
+                  <span>Доска расследования</span><span className="menu-item-meta">[TAB]</span>
+                </button>
+                <button className="menu-item" onClick={() => setDossierModalOpen(true)}>
+                  <span>Досье субъекта (Концовки)</span><span className="menu-item-meta">Открыто: {unlockedEndings.length}/7</span>
+                </button>
+                <button className="menu-item" onClick={() => setDiaryModalOpen(true)}>
+                  <span>Дневник расследования</span><span className="menu-item-meta">Записей: {diaryEntries.length}</span>
+                </button>
+                <button className="menu-item" onClick={() => setInventoryModalOpen(true)}>
+                  <span>Документы Б.И.Г.</span><span className="menu-item-meta">{inventoryDocs.length} из {docSlotKeys.length}</span>
+                </button>
+                <button className="menu-item" onClick={() => setScreen('settings')}>
+                  <span>Настройки терминала</span><span className="menu-item-meta">Экран / Аудио</span>
+                </button>
+              </nav>
+            </div>
+            <div style={{ fontSize: '0.74rem', color: '#666458', borderTop: '1px dashed #292922', paddingTop: '12px' }}>
+              Сборка v13.0 Release // Разделённая архитектура.
+            </div>
+          </aside>
+          <section className="hero-art">
+            <MainMenuBackdrop />
+            <div className="hero-art-caption">
+              <strong>АРСЕНАЛ СЛЕДОВАТЕЛЯ:</strong> Нажмите <strong>[TAB]</strong> для открытия пробковой Доски улик с красными нитями или <strong>[`]</strong> для командной строки Б.И.Г.
+            </div>
+          </section>
+        </main>
+      )}
+
+      {screen === 'archive' && (
+        <main className="archive-container">
+          <div className="archive-header">
+            <div>
+              <h2 className="archive-title">
+                КАРТОТЕКА СЕКТОРОВ Б.И.Г. {adminModeUnlocked ? '(00 → 11 // ROOT-РЕЖИМ)' : '(00 → 08)'}
+              </h2>
+              <p style={{ color: 'var(--text-muted)', marginTop: '4px', fontSize: '0.86rem' }}>
+                Осматривайте объекты на иллюстрациях каждого сектора, чтобы продвигаться по цепочке.
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+              {!baseDocsCollected && (
+                <button className={`btn-surrender ${surrenderConfirm ? 'confirming' : ''}`} onClick={handlePassiveDisappearEnding}>
+                  {surrenderConfirm ? '[ Подтвердить: Прекратить поиски? ]' : 'Прекратить поиски (Сдаться)'}
+                </button>
+              )}
+              <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', padding: '8px 14px', fontSize: '0.8rem', color: 'var(--accent)' }}>
+                Документов: {inventoryDocs.length}/{docSlotKeys.length} | Зацепок: {extractedClues.length}/4
+              </div>
+            </div>
+          </div>
+
+          <div className="chain-bar">
+            {visibleLevels.map((lvl, i) => {
+              const unlocked = isLevelUnlocked(lvl);
+              const cleared = isLevelFullyCleared(lvl);
+              return (
+                <React.Fragment key={lvl.id}>
+                  <span className={`chain-node ${cleared ? 'cleared' : unlocked ? 'unlocked' : ''}`}>
+                    {unlocked ? (cleared ? `✓ ${lvl.number}` : lvl.number) : `🔒 ${lvl.number}`}
+                  </span>
+                  {i < visibleLevels.length - 1 && <span style={{ color: '#555' }}>&rarr;</span>}
+                </React.Fragment>
+              );
+            })}
+          </div>
+
+          <div className="levels-grid">
+            {visibleLevels.map((lvl) => {
+              const unlocked = isLevelUnlocked(lvl);
+              const reqHotspots = lvl.hotspots.filter(h => !h.trap);
+              const doneCount = (exploredMap[lvl.id] || []).filter(id => reqHotspots.some(h => h.id === id)).length;
+              const isComplete = isLevelFullyCleared(lvl);
+
+              return (
+                <button
+                  key={lvl.id}
+                  className={`level-card ${!unlocked ? 'locked-card' : ''}`}
+                  style={{ '--card-accent': lvl.accent }}
+                  onMouseEnter={() => unlocked && (setAmbientTint(lvl.tint || 'rgba(0,0,0,0)'), setSilhouette(lvl.silhouette || ''))}
+                  onMouseLeave={() => (setAmbientTint('rgba(0,0,0,0)'), setSilhouette(''))}
+                  onClick={() => unlocked && openLevel(lvl.id)}
+                >
+                  {!unlocked && (
+                    <div className="lock-overlay">
+                      <div style={{ fontSize: '1.8rem' }}>🔒</div>
+                      <strong>СЕКТОР ЗАБЛОКИРОВАН</strong>
+                      <span style={{ color: '#999', fontSize: '0.75rem' }}>Сначала исследуйте предыдущий сектор</span>
+                    </div>
+                  )}
+                  <div className="card-thumb">
+                    <LevelIllustration levelId={lvl.id} isThumbnail={true} />
+                    <div className="card-badges">
+                      <span className="badge">{lvl.number}</span>
+                      <span className={`badge ${isComplete ? 'badge-cleared' : ''}`}>
+                        {isComplete ? 'Изучен ✓' : `Улики: ${doneCount}/${reqHotspots.length}`}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="card-body">
+                    <div className="card-title-row">
+                      <h3 className="card-title">{lvl.title}</h3>
+                      <span className="card-tone">{lvl.tone}</span>
+                    </div>
+                    <p className="card-sub">{lvl.story}</p>
+                    <div className="card-quote">{lvl.quote}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </main>
+      )}
+
+      {screen === 'level' && currentLevel && (
+        <main className="level-screen" style={{ '--lvl-accent': currentLevel.accent }}>
+          {!isNoEscapeSector ? (
+            <div className="level-screen-nav">
+              <button className="btn" onClick={() => { sound.stopAmbient(); setScreen('archive'); }}>
+                &larr; К картотеке секторов
+              </button>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                {visibleLevels.map((l) => {
+                  const unlocked = isLevelUnlocked(l);
+                  return (
+                    <button
+                      key={l.id}
+                      disabled={!unlocked}
+                      className="btn"
+                      style={{
+                        borderColor: l.id === currentLevel.id ? currentLevel.accent : undefined,
+                        background: l.id === currentLevel.id ? 'rgba(184, 166, 102, 0.2)' : undefined
+                      }}
+                      onClick={() => openLevel(l.id)}
+                    >
+                      {unlocked ? l.number : `🔒 ${l.number}`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="level-screen-nav">
+              <div style={{ color: '#ff5d73', fontSize: '0.85rem', letterSpacing: '2px' }}>
+                // ВЫХОД ЗАБЛОКИРОВАН ПРОТОКОЛОМ Б.И.Г. — НАЗАД ПУТИ НЕТ //
+              </div>
+            </div>
+          )}
+
+          <div className="level-layout">
+            <section className="panel">
+              <div className="panel-header">
+                <div className="lvl-index">{currentLevel.number}</div>
+                <h2 className="lvl-main-title">{currentLevel.title}</h2>
+                <div className="lvl-story-chapter selectable-text">{currentLevel.story}</div>
+                <span className="lvl-mood-tag">Атмосфера: {currentLevel.tone}</span>
+              </div>
+
+              <div className="docs-widget">
+                <div className="section-label" style={{ marginBottom: 0 }}>
+                  <span>Инвентарь: Документы Б.И.Г.</span>
+                  <span style={{ color: 'var(--accent)' }}>{inventoryDocs.length} / {docSlotKeys.length}</span>
+                </div>
+
+                <div className="docs-slots">
+                  {docSlotKeys.map((docKey, i) => {
+                    const found = inventoryDocs.includes(docKey);
+                    const meta = SECRET_DOCS_META[docKey];
+                    return (
+                      <div
+                        key={docKey}
+                        className={`doc-slot ${found ? 'found' : ''}`}
+                        onClick={() => found && openDocumentReader(meta)}
+                      >
+                        <span>
+                          <strong>[{found ? meta.code : `ДОКУМЕНТ #0${i + 1}`}]</strong>{' '}
+                          {found ? meta.title : 'Не найден'}
+                        </span>
+                        <span style={{ fontSize: '0.72rem', color: found ? 'var(--accent)' : '#555' }}>
+                          {found ? 'Читать' : 'Скрыто'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="decoder-notebook">
+                  <div style={{ fontSize: '0.73rem', color: 'var(--accent)', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>БЛОКНОТ ДЕШИФРОВКИ (ЗАЦЕПКИ)</span>
+                    <span>{extractedClues.length}/4</span>
+                  </div>
+                  {extractedClues.length === 0 ? (
+                    <div className="selectable-text" style={{ fontSize: '0.74rem', color: '#777', lineHeight: '1.4' }}>
+                      Откройте найденный документ и кликните по подсвеченным словам-числам в тексте, чтобы выписать их сюда.
+                    </div>
+                  ) : (
+                    <div className="clue-chips-wrap">
+                      {extractedClues.map(ck => {
+                        const token = CLUE_TOKENS[ck];
+                        return (
+                          <span
+                            key={ck}
+                            className={`clue-chip ${token.isTrap ? 'trap-chip' : ''}`}
+                            onClick={() => { sound.playSpatialClick(640); triggerSubtitle(`Зацепка: ${token.label}`); }}
+                          >
+                            {token.label}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <p className="lvl-description selectable-text">{currentLevel.description}</p>
+
+              {currentLevel.features && (
+                <div>
+                  <div className="section-label">Особенности среды</div>
+                  <ul className="feature-list selectable-text">
+                    {currentLevel.features.map((f, i) => <li key={i}>{f}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              <div>
+                <div className="section-label">Архивная справка</div>
+                <div className="connection-note selectable-text">{currentLevel.connection}</div>
+              </div>
+            </section>
+
+            <section className="stage-wrapper">
+              <div className="stage-toolbar">
+                <span style={{ fontSize: '0.75rem', color: uvMode ? 'var(--uv-glow)' : 'var(--text-muted)', letterSpacing: '1px' }}>
+                  {uvMode
+                    ? '🟣 АКТИВЕН УЛЬТРАФИОЛЕТОВЫЙ СПЕКТР (365 нм) — ПРОЯВЛЕНЫ СКРЫТЫЕ НАДПИСИ'
+                    : 'КАМЕРА ВИЗУАЛЬНОГО НАБЛЮДЕНИЯ // ШТАТНЫЙ СПЕКТР'}
+                </span>
+                <button
+                  className={`btn-uv ${uvMode ? 'active' : ''}`}
+                  onClick={() => { sound.playSpatialClick(uvMode ? 440 : 780); setUvMode(!uvMode); }}
+                >
+                  <span>🔦 {uvMode ? 'УФ-СПЕКТР: ВКЛ' : 'ВКЛЮЧИТЬ УФ-ФИЛЬТР'}</span>
+                </button>
+              </div>
+
+              <div className={`stage-viewport ${uvMode ? 'uv-active' : ''}`}>
+                <LevelIllustration
+                  levelId={currentLevel.id}
+                  hotspots={currentLevel.hotspots}
+                  explored={currentExplored}
+                  puzzleSteps={puzzleSteps}
+                  onSelectHotspot={handleInspectHotspot}
+                  uvMode={uvMode}
+                />
+              </div>
+
+              <div className="inspection-console">
+                {activeReport ? (
+                  <>
+                    <div className="inspection-title selectable-text">Вы заметили: {activeReport.label}</div>
+                    <div className="inspection-text">{activeReport.report}</div>
+                    {currentLevel.id === 'lvl-9' && activeReport.id === 'h9-end' && (
+                      <div style={{ marginTop: '8px', display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <button className="btn-strict" onClick={handleAcceptFateInTheEnd}>
+                          [ Принять судьбу ]
+                        </button>
+                        <span style={{ fontSize: '0.75rem', color: '#a855f7' }}>
+                          (Подсказка: или включите УФ-фильтр и кликните на том снова...)
+                        </span>
+                      </div>
+                    )}
+                    {currentLevel.id === 'lvl-13' && activeReport.id === 'h13-maw' && (
+                      <div style={{ marginTop: '8px' }}>
+                        <button className="btn-strict" style={{ borderColor: '#ff3b56', color: '#ffd6db' }} onClick={handleDigestedEnding}>
+                          [ Принять судьбу ]
+                        </button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="inspection-title">ЖУРНАЛ ВИЗУАЛЬНОЙ ИНСПЕКЦИИ</div>
+                    <div className="inspection-text" style={{ color: '#8a8879' }}>
+                      Нажимайте на предметы на сцене выше или включите «УФ-фильтр», чтобы увидеть флуоресцентные пометки.
+                    </div>
+                  </>
+                )}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="danger-box">
+                <div className="section-label" style={{ marginBottom: 0 }}>
+                  <span>Индекс контроля Б.И.Г.</span><span>{currentLevel.danger} / 5</span>
+                </div>
+                <div className="danger-bars">
+                  {[1, 2, 3, 4, 5].map(n => (
+                    <div key={n} className="danger-bar" style={{ background: n <= currentLevel.danger ? (currentLevel.danger >= 4 ? 'var(--danger)' : currentLevel.danger === 3 ? '#c29b48' : 'var(--safe)') : 'transparent' }} />
+                  ))}
+                </div>
+              </div>
+
+              <div className="entity-card">
+                <div className="section-label">Наблюдатель / Объект</div>
+                <div className="entity-name selectable-text">{currentLevel.entity.name}</div>
+                <p className="entity-desc selectable-text">{currentLevel.entity.desc}</p>
+              </div>
+
+              <div className="task-card">
+                <div className="section-label">
+                  <span>Улики в секторе (Ищите на сцене)</span>
+                  <span>{isLevelFullyCleared(currentLevel) ? 'ИЗУЧЕНО' : 'В процессе'}</span>
+                </div>
+                <p className="selectable-text" style={{ fontSize: '0.8rem', color: '#c2c0b2' }}>{currentLevel.task}</p>
+
+                <div className="hotspot-btn-list">
+                  {currentLevel.hotspots.map((h) => {
+                    const done = currentExplored.includes(h.id);
+                    const isCurrent = activeReport?.id === h.id;
+                    const stepCount = puzzleSteps[h.id] || 0;
+                    return (
+                      <div key={h.id} className={`hotspot-info-item ${isCurrent ? 'active' : ''}`}>
+                        <span className="selectable-text">{h.label}</span>
+                        <span style={{ color: done ? '#b8a666' : '#666' }}>
+                          {done ? 'Изучено' : h.interactiveSteps ? `Ход: ${stepCount}/${h.interactiveSteps}` : 'Не изучено'}
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {currentLevel.id === 'lvl-10' && isLevelFullyCleared(currentLevel) && (
+                    <button className="secret-option-btn unlocked" onClick={() => openLevel('lvl-11', true)}>
+                      <span>[ROOT] Войти в Сектор 11: Ядро Б.И.Г.</span>
+                      <span>ОТКРЫТО &rarr;</span>
+                    </button>
+                  )}
+
+                  {currentLevel.id === 'lvl-fun' && (
+                    <button
+                      className={`secret-option-btn ${baseDocsCollected ? 'unlocked' : 'locked'}`}
+                      disabled={!baseDocsCollected}
+                      onClick={() => {
+                        sound.playSpatialClick(880);
+                        setCodeInput(pinSlots.join(''));
+                        setCodeError('');
+                        setCodeModalOpen(true);
+                      }}
+                    >
+                      <span>[???] Ввести код шлюза Б.И.Г.</span>
+                      <span>{baseDocsCollected ? 'ВВОД КОДА' : `Нужны док-ты (${inventoryDocs.filter(d => d !== 'doc4').length}/3)`}</span>
+                    </button>
+                  )}
+
+                  {(currentLevel.id === 'lvl-fun' || currentLevel.id === 'lvl-9') && !baseDocsCollected && (
+                    <button
+                      className={`btn-surrender ${surrenderConfirm ? 'confirming' : ''}`}
+                      style={{ marginTop: '8px', width: '100%' }}
+                      onClick={handlePassiveDisappearEnding}
+                    >
+                      {surrenderConfirm ? '[ Подтвердить: Остаться навсегда? ]' : 'Прекратить поиски (Сдаться)'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
+        </main>
+      )}
+
+      {boardOpen && (
+        <div className="board-modal-overlay">
+          <div className="board-header">
+            <div>
+              <h2 style={{ color: '#f0eee2', fontSize: '1.4rem', letterSpacing: '2px', fontWeight: 'normal' }}>
+                📌 ДОСКА РАССЛЕДОВАНИЯ СЛЕДОВАТЕЛЯ // EVIDENCE BOARD
+              </h2>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                Перетаскивайте карточки за верхнюю плашку. Нажмите «Связать нитью» на двух карточках, чтобы протянуть между ними красную нить.
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button className="btn" onClick={handleAddBoardNote}>[ + Наклеить заметку ]</button>
+              <button className="btn" onClick={() => setBoardLinks([])}>Очистить нити</button>
+              <button className="btn" onClick={() => setBoardOpen(false)}>Закрыть [TAB]</button>
+            </div>
+          </div>
+
+          <div
+            className="board-canvas"
+            ref={boardCanvasRef}
+            onMouseMove={handleBoardMouseMove}
+            onMouseUp={handleBoardMouseUp}
+            onMouseLeave={handleBoardMouseUp}
+          >
+            <svg className="board-svg-links">
+              {boardLinks.map((link, idx) => {
+                const fromNode = boardNodes.find(n => n.id === link.from);
+                const toNode = boardNodes.find(n => n.id === link.to);
+                if (!fromNode || !toNode) return null;
+                return (
+                  <line
+                    key={idx}
+                    x1={fromNode.x + 115} y1={fromNode.y + 35}
+                    x2={toNode.x + 115} y2={toNode.y + 35}
+                    stroke="#d9384a" strokeWidth="2.5"
+                    style={{ filter: 'drop-shadow(0 0 6px #ff4d6d)' }}
+                  />
+                );
+              })}
+            </svg>
+
+            {boardNodes.map(node => (
+              <div
+                key={node.id}
+                className={`board-card-node ${node.isNote ? 'pinned-note' : ''}`}
+                style={{ left: node.x, top: node.y }}
+              >
+                <div className="board-card-drag-bar" onMouseDown={(e) => handleBoardMouseDown(e, node.id)}>
+                  <span>{node.title}</span>
+                  <span className="pin-badge-red"></span>
+                </div>
+                <div className="selectable-text" style={{ fontSize: '0.8rem', lineHeight: '1.45' }}>{node.text}</div>
+                <button
+                  className="btn"
+                  style={{ fontSize: '0.68rem', padding: '3px 6px', marginTop: '4px', borderColor: linkingFromId === node.id ? '#ff4d6d' : undefined }}
+                  onClick={() => handleConnectBoardNode(node.id)}
+                >
+                  {linkingFromId === node.id ? 'Выберите 2-ю карточку...' : 'Связать нитью'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!cliOpen && (
+        <button className="cli-bar-toggle" onClick={() => setCliOpen(true)}>
+          <span>&gt;_ ТЕРМИНАЛ Б.И.Г. [`]</span>
+        </button>
+      )}
+
+      {cliOpen && (
+        <div className="cli-drawer">
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #222', paddingBottom: '4px', marginBottom: '6px' }}>
+            <span style={{ color: 'var(--accent)', fontSize: '0.78rem' }}>ТЕРМИНАЛ Б.И.Г. // СИСТЕМНЫЙ КАНАЛ 44.1 (CLI)</span>
+            <button className="btn" style={{ fontSize: '0.7rem', padding: '2px 8px' }} onClick={() => setCliOpen(false)}>Свернуть [`]</button>
+          </div>
+          <div className="cli-history">
+            {cliHistory.map((line, idx) => <div className="selectable-text" key={idx}>{line}</div>)}
+          </div>
+          <form onSubmit={handleCliSubmit} className="cli-input-row">
+            <span style={{ color: '#8cd460' }}>root@big-terminal:~#</span>
+            <input
+              type="text"
+              className="cli-input"
+              value={cliInput}
+              onChange={(e) => setCliInput(e.target.value)}
+              placeholder="Введите команду (help, scan, cat doc-1, ping 44.1, status, override, clear)..."
+              autoFocus
+            />
+          </form>
+        </div>
+      )}
+
+      {coreConsoleModalOpen && (
+        <div className="modal-overlay" onClick={() => setCoreConsoleModalOpen(false)}>
+          <div className="doors-modal" style={{ maxWidth: '760px', borderColor: '#ff3b56' }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: '0.78rem', color: '#ff6b81', letterSpacing: '3px', marginBottom: '8px' }}>
+              ТЕРМИНАЛ ЯДРА Б.И.Г. // КЛЮЧ АДМИНИСТРАТОРА ПРИНЯТ
+            </div>
+            <h2 style={{ color: '#fff', fontSize: '1.75rem', letterSpacing: '2px', marginBottom: '12px', fontWeight: 'normal' }}>
+              ВЫБЕРИТЕ ДИРЕКТИВУ ЯДРА
+            </h2>
+            <p style={{ fontSize: '0.9rem', color: '#d8d6c8', lineHeight: '1.6', maxWidth: '640px', margin: '0 auto' }}>
+              Вы получили полный root-доступ к серверам Большой Исследовательской Группы. Вы можете стереть всю симуляцию прямо сейчас — или попытаться принудительно распечатать запретный Корневой Архив #00.
+            </p>
+            <div className="doors-container">
+              <div className="door-card left-door" onClick={handleAdminShutdownEnding}>
+                <div style={{ fontSize: '2.1rem' }}>🛑⚡</div>
+                <h3 style={{ color: '#8cd460', letterSpacing: '1px' }}>ДИРЕКТИВА: «УДАЛИТЬ»</h3>
+                <p style={{ fontSize: '0.83rem', color: '#a8a698', lineHeight: '1.5' }}>
+                  Полное форматирование серверов Б.И.Г. и отключение всех секторов Архива вместе с вашей цифровой копией.
+                </p>
+                <span className="btn-strict" style={{ marginTop: 'auto' }}>[ Нажать «Удалить» ]</span>
+              </div>
+              <div className="door-card right-door" onClick={handleTriggerCoreOverreach}>
+                <div style={{ fontSize: '2.1rem' }}>👁️🩸</div>
+                <h3 style={{ color: '#ff5d73', letterSpacing: '1px' }}>ВСКРЫТЬ КОРНЕВОЙ АРХИВ #00</h3>
+                <p style={{ fontSize: '0.83rem', color: '#a8a698', lineHeight: '1.5' }}>
+                  Запросить сверхсекретный уровень допуска Основателей и узнать, на чём именно работают серверы Б.И.Г.
+                </p>
+                <span className="btn-strict" style={{ marginTop: 'auto', borderColor: '#ff3b56', color: '#ffb3bd' }}>
+                  [ Превысить полномочия ]
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {debugModalOpen && (
+        <div className="modal-overlay" style={{ zIndex: 9950 }} onClick={() => setDebugModalOpen(false)}>
+          <div className="debug-console-modal" onClick={e => e.stopPropagation()}>
+            <div className="debug-warning-banner">ВНИМАНИЕ: ДОСТУП ТОЛЬКО ДЛЯ ПЕРСОНАЛА Б.И.Г.</div>
+            <h3 style={{ color: '#b8f28a', marginBottom: '14px', letterSpacing: '2px' }}>КОНСОЛЬ СМОТРИТЕЛЯ // DEBUG MODE [F2]</h3>
+            <button className="debug-btn" onClick={handleDebugUnlockAllSectors}>
+              <span>[ Разблокировать все сектора ]</span><span>00–11 + Ключ</span>
+            </button>
+            <button className="debug-btn" onClick={handleDebugGrantAllDocs}>
+              <span>[ Выдать все документы ]</span><span>doc1–doc4 + Ключ</span>
+            </button>
+            <button className="debug-btn" onClick={() => handleDebugTeleport('lvl-7')}>
+              <span>[ Телепорт на Сектор 07 (Смотритель) ]</span><span>&rarr; lvl-7</span>
+            </button>
+            <button className="debug-btn" onClick={() => handleDebugTeleport('lvl-fun')}>
+              <span>[ Телепорт на Сектор 08 (Кодовый шлюз) ]</span><span>&rarr; lvl-fun</span>
+            </button>
+            <button className="debug-btn" onClick={() => handleDebugTeleport('lvl-9')}>
+              <span>[ Телепорт на Сектор 09 (The End) ]</span><span>&rarr; lvl-9</span>
+            </button>
+            <button className="debug-btn" onClick={() => handleDebugTeleport('lvl-10')}>
+              <span>[ Телепорт на Сектор 10 (Чистилище данных) ]</span><span>&rarr; lvl-10</span>
+            </button>
+            <button className="debug-btn" onClick={() => handleDebugTeleport('lvl-11')}>
+              <span>[ Телепорт на Сектор 11 (Ядро Б.И.Г.) ]</span><span>&rarr; lvl-11</span>
+            </button>
+            <button className="debug-btn" onClick={() => handleDebugTeleport('lvl-13')}>
+              <span>[ Телепорт на Сектор 13 (Пасть Архива) ]</span><span>&rarr; lvl-13</span>
+            </button>
+            <button className="debug-btn" style={{ borderColor: '#6b5824', color: '#f0d878' }} onClick={() => resetProgress(false)}>
+              <span>[ Сбросить прогресс ]</span><span>resetProgress()</span>
+            </button>
+            <button className="debug-btn" style={{ justifyContent: 'center', marginTop: '6px' }} onClick={() => setDebugModalOpen(false)}>
+              <span>[ Закрыть консоль ]</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {codeModalOpen && (
+        <div className="modal-overlay" onClick={() => setCodeModalOpen(false)}>
+          <div className="keypad-modal" onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--accent)', letterSpacing: '3px', marginBottom: '6px' }}>
+              ТЕРМИНАЛ БЛОКИРОВКИ ШЛЮЗА // СЕКТОР 08
+            </div>
+            <h2 style={{ color: '#fff', fontSize: '1.5rem', fontWeight: 'normal', letterSpacing: '2px', marginBottom: '10px' }}>
+              ВВЕДИТЕ ТРЁХЗНАЧНЫЙ КОД
+            </h2>
+            <p style={{ fontSize: '0.84rem', color: '#d8d2b8', lineHeight: '1.5', background: 'rgba(181,166,107,0.1)', border: '1px dashed var(--accent)', padding: '9px 12px' }}>
+              «Проверьте данные в документах. Один из них может быть подделкой».
+            </p>
+
+            <div style={{ marginTop: '14px', background: '#0e0e0b', border: '1px solid #2e2c22', padding: '12px' }}>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                ВЫПИСАННЫЕ УЛИКИ ИЗ БЛОКНОТА (Нажмите, чтобы подставить в слот #{activeSlotIdx + 1}):
+              </div>
+              {extractedClues.length === 0 ? (
+                <div style={{ fontSize: '0.76rem', color: '#777', marginBottom: '8px' }}>
+                  Вы ещё не выписали числительные из текстов документов (или введите код вручную ниже).
+                </div>
+              ) : (
+                <div className="clue-chips-wrap" style={{ justifyContent: 'center', marginBottom: '10px' }}>
+                  {extractedClues.map(ck => (
+                    <button key={ck} type="button" className={`clue-chip ${CLUE_TOKENS[ck].isTrap ? 'trap-chip' : ''}`} onClick={() => applyClueToDecoder(ck)}>
+                      {CLUE_TOKENS[ck].label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="pin-slots-row">
+                {[0, 1, 2].map(idx => (
+                  <div key={idx} className={`pin-slot-box ${activeSlotIdx === idx ? 'active-slot' : ''}`} onClick={() => setActiveSlotIdx(idx)}>
+                    <span className="pin-slot-index">#{idx + 1}</span>
+                    <span>{codeInput[idx] || '·'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '12px', flexWrap: 'wrap' }}>
+              {['doc1', 'doc2', 'doc3'].map((k, idx) => (
+                <button key={k} type="button" className="btn" style={{ fontSize: '0.74rem', padding: '5px 10px' }} onClick={() => openDocumentReader(SECRET_DOCS_META[k])}>
+                  Читать Док #{idx + 1}
+                </button>
+              ))}
+            </div>
+
+            <form onSubmit={handleCodeSubmit}>
+              <input
+                type="text"
+                maxLength={3}
+                value={codeInput}
+                onChange={e => {
+                  setCodeError('');
+                  const val = e.target.value.replace(/[^0-9]/g, '');
+                  setCodeInput(val);
+                  setPinSlots([val[0] || '', val[1] || '', val[2] || '']);
+                }}
+                placeholder="---"
+                className="code-input-field"
+                autoFocus
+              />
+              <div className="code-error-msg">{codeError}</div>
+              <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', marginTop: '8px' }}>
+                <button type="submit" className="btn-strict">[ Подтвердить код ]</button>
+                <button type="button" className="btn" onClick={() => setCodeModalOpen(false)}>Отмена</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {screen === 'doors' && (
+        <div className="modal-overlay">
+          <div className="doors-modal">
+            <div style={{ fontSize: '0.78rem', color: '#8cd460', letterSpacing: '3px', marginBottom: '8px' }}>
+              КОД 481 ПРИНЯТ // ЗАЩИТА СМОТРИТЕЛЯ ОБОЙДЕНА
+            </div>
+            <h2 style={{ color: '#fff', fontSize: '1.85rem', letterSpacing: '2px', marginBottom: '14px', fontWeight: 'normal' }}>
+              РАЗВИЛКА ЗА ПРАЗДНИЧНЫМ СТОЛОМ
+            </h2>
+            <p style={{ fontSize: '0.92rem', color: '#d8d6c8', lineHeight: '1.65', maxWidth: '700px', margin: '0 auto' }}>
+              За вами следили с самого начала. Б.И.Г. не допустит утечки. Вы стоите перед выбором, который вам навязали. Зеленая дверь — ловушка, красная — выход. Но помните: Б.И.Г. никогда не отпускает своих свидетелей.
+            </p>
+            <div className="doors-container">
+              <div className="door-card left-door" onClick={handleLeftGreenDoorTrap}>
+                <div style={{ fontSize: '2.3rem' }}>🚪🟢</div>
+                <h3 style={{ color: '#c8d6b8', letterSpacing: '1px' }}>ЗЕЛЁНАЯ ДВЕРЬ: «EXIT»</h3>
+                <p style={{ fontSize: '0.84rem', color: '#a8a698', lineHeight: '1.5' }}>
+                  Спокойный зелёный плафон эвакуации и искусственный запах свежего дождя из вентилятора Б.И.Г.
+                </p>
+                <span className="btn-strict" style={{ marginTop: 'auto' }}>[ Выбрать зелёную дверь ]</span>
+              </div>
+              <div className="door-card right-door" onClick={handleRightRedDoorEscape}>
+                <div style={{ fontSize: '2.3rem' }}>🚪🔴</div>
+                <h3 style={{ color: '#ff5d73', letterSpacing: '1px' }}>КРАСНАЯ ДВЕРЬ: «ШЛЮЗ №1»</h3>
+                <p style={{ fontSize: '0.84rem', color: '#a8a698', lineHeight: '1.5' }}>
+                  Тяжёлая техническая гермодверь, идущая первой в протоколе эвакуации Б.И.Г.
+                </p>
+                <span className="btn-strict" style={{ marginTop: 'auto' }}>[ Выбрать красную дверь ]</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === 'trap' && (
+        <main
+          className="trap-phase-screen"
+          style={{
+            backgroundColor: trapPhase === 1 ? '#122416' : '#2b090c',
+            color: trapPhase === 1 ? '#d4f5dd' : '#ffb3bd'
+          }}
+        >
+          {trapPhase === 1 ? (
+            <div style={{ maxWidth: '620px' }}>
+              <h2 style={{ fontSize: '1.8rem', fontWeight: 'normal', marginBottom: '12px' }}>
+                Вы шагнули под зелёный плафон «EXIT»...
+              </h2>
+              <p style={{ fontSize: '0.95rem' }}>Но запах дождя оказался синтетическим аэрозолем Б.И.Г.</p>
+            </div>
+          ) : (
+            <div style={{ maxWidth: '640px' }}>
+              <h1 style={{ fontSize: '2.3rem', letterSpacing: '4px', marginBottom: '12px', fontWeight: 'normal' }}>
+                ГЕРМОДВЕРЬ ЗАХЛОПНУЛАСЬ
+              </h1>
+              <p style={{ fontSize: '1rem' }}>Впереди — лишь бесконечный замкнутый коридор...</p>
+            </div>
+          )}
+        </main>
+      )}
+
+      {screen === 'ending' && endingData && (
+        <main style={{ minHeight: 'calc(100vh - 56px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '18px', textAlign: 'center', padding: '28px', position: 'relative', zIndex: 5 }}>
+          <div style={{ fontSize: '0.85rem', color: endingData.isGoodEnding ? '#8cd460' : endingData.color, letterSpacing: '4px' }}>
+            {endingData.code}
+          </div>
+          <h1 style={{ color: endingData.isGoodEnding ? '#8cd460' : '#f2f0e4', fontSize: '2.4rem', letterSpacing: '3px', fontWeight: 'normal', maxWidth: '780px' }}>
+            «{endingData.title}»
+          </h1>
+          <div style={{ fontSize: '0.85rem', color: 'var(--accent)', letterSpacing: '2px' }}>
+            ШТАМП ЗАНЕСЁН В ДОСЬЕ ({unlockedEndings.length}/7) // ДОКУМЕНТОВ СОБРАНО: {inventoryDocs.length}/{docSlotKeys.length}
+          </div>
+          <p className="selectable-text" style={{ color: 'var(--text-main)', maxWidth: '660px', lineHeight: '1.7', fontSize: '0.98rem' }}>
+            {endingData.summary}
+          </p>
+          <div style={{ display: 'flex', gap: '14px', marginTop: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+            <button className="btn-strict" onClick={() => setDossierModalOpen(true)}>
+              [ Открыть Досье концовок ({unlockedEndings.length}/7) ]
+            </button>
+            <button className="btn-strict" onClick={() => resetProgress(true)}>
+              [ Начать заново ]
+            </button>
+            <button className="btn-strict" onClick={() => resetProgress(false)}>
+              [ Главное меню ]
+            </button>
+          </div>
+        </main>
+      )}
+
+      {dossierModalOpen && (
+        <div className="modal-overlay" onClick={() => setDossierModalOpen(false)}>
+          <div className="doc-reader-modal" style={{ maxWidth: '840px' }} onClick={e => e.stopPropagation()}>
+            <div className="doc-stamp">АРХИВ Б.И.Г. // ЛИЧНОЕ ДЕЛО ИСПЫТУЕМОГО</div>
+            <h2 style={{ color: 'var(--accent)', letterSpacing: '2px', fontWeight: 'normal', marginBottom: '6px' }}>
+              ДОСЬЕ СУБЪЕКТА: ОТКРЫТЫЕ ФИНАЛЫ ({unlockedEndings.length} ИЗ 7)
+            </h2>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
+              Штампы концовок сохраняются между экспедициями. Откройте все 7 исходов, чтобы расшифровать послание Основателя.
+            </p>
+
+            <div className="dossier-grid">
+              {ENDINGS_CATALOG.map((item) => {
+                const isUnlocked = unlockedEndings.includes(item.id);
+                return (
+                  <div key={item.id} className={`dossier-card ${isUnlocked ? 'unlocked' : ''}`}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <strong style={{ fontSize: '0.78rem', color: isUnlocked ? '#f2e8b6' : '#666' }}>{item.code}</strong>
+                      {isUnlocked && <span className="dossier-stamp">ШТАМП ПОЛУЧЕН ✓</span>}
+                    </div>
+                    <div style={{ fontSize: '0.98rem', color: isUnlocked ? '#fff' : '#555' }}>
+                      {isUnlocked ? `«${item.title}»` : 'Засекреченный исход'}
+                    </div>
+                    <p className="selectable-text" style={{ fontSize: '0.76rem', color: isUnlocked ? '#c2c0b2' : '#777', lineHeight: '1.45' }}>
+                      {isUnlocked ? item.summary : `Условие открытия: ${item.hint}`}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            {unlockedEndings.length === 7 && (
+              <div className="founder-secret-box">
+                <div style={{ fontSize: '0.76rem', color: '#8cd460', letterSpacing: '2px', marginBottom: '6px' }}>
+                  // ДОСТУП УРОВНЯ ОМЕГА РАЗБЛОКИРОВАН (7/7 КОНЦОВОК) //
+                </div>
+                <h3 style={{ color: '#fff', fontWeight: 'normal', marginBottom: '8px' }}>
+                  Секретное письмо Основателя симуляции «44.1»
+                </h3>
+                <p className="selectable-text" style={{ fontSize: '0.86rem', color: '#d8f0c8', lineHeight: '1.6' }}>
+                  «Поздравляю, детектив. Вы прошли через все семь сценариев, заложенных Большой Исследовательской Группой, взломали "The End", побывали в Ядре и даже увидели биореактор Сектора 13. Теперь в этом архиве для вас не осталось тайн — терминал 44.1 полностью подчиняется вам».
+                </p>
+              </div>
+            )}
+
+            <div style={{ marginTop: '18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Нажмите [ESC] для закрытия</span>
+              <button className="btn" onClick={() => setDossierModalOpen(false)}>Закрыть досье</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {diaryModalOpen && (
+        <div className="modal-overlay" onClick={() => setDiaryModalOpen(false)}>
+          <div className="doc-reader-modal" style={{ maxWidth: '760px' }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ color: 'var(--accent)', letterSpacing: '2px', fontWeight: 'normal', marginBottom: '6px' }}>
+              ЖУРНАЛ РАССЛЕДОВАНИЯ
+            </h2>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+              Хроника ваших находок и зацепок в секторах Б.И.Г.
+            </p>
+            <div style={{ maxHeight: '55vh', overflowY: 'auto', paddingRight: '6px' }}>
+              {diaryEntries.map((entry) => (
+                <div key={entry.id} className="diary-entry">
+                  <div className="diary-meta">// {entry.title}</div>
+                  <div className="diary-text selectable-text">{entry.text}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: '18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Нажмите [ESC] для закрытия</span>
+              <button className="btn" onClick={() => setDiaryModalOpen(false)}>Закрыть журнал</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {readingDoc && (
+        <div className="modal-overlay" style={{ zIndex: 9800 }} onClick={() => setReadingDoc(null)}>
+          <div className="doc-reader-modal" onClick={e => e.stopPropagation()}>
+            <div className="doc-stamp">{readingDoc.stamp}</div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--accent)', letterSpacing: '2px' }}>
+              {readingDoc.code} // {readingDoc.author}
+            </div>
+            <h2 style={{ color: '#fff', fontSize: '1.4rem', marginTop: '6px', fontWeight: 'normal' }}>{readingDoc.title}</h2>
+            <div className="doc-paper selectable-text">{renderInteractiveDocContent(readingDoc.id)}</div>
+            <div className="doc-cipher-highlight selectable-text">
+              <strong>Выделенная строка:</strong><br />{readingDoc.cipherFragment}
+            </div>
+            <div style={{ marginTop: '18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+              <span style={{ fontSize: '0.76rem', color: '#8cd460' }}>💡 {readingDoc.note}</span>
+              <button className="btn" onClick={() => setReadingDoc(null)}>Закрыть [ESC]</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {inventoryModalOpen && (
+        <div className="modal-overlay" onClick={() => setInventoryModalOpen(false)}>
+          <div className="doc-reader-modal" style={{ maxWidth: '760px' }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ color: 'var(--accent)', letterSpacing: '2px', fontWeight: 'normal', marginBottom: '8px' }}>
+              ДОКУМЕНТЫ Б.И.Г. ({inventoryDocs.length} ИЗ 4)
+            </h2>
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+              Откройте любой найденный документ и кликните по выделенным числительным в тексте, чтобы выписать их в Блокнот дешифровки.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {['doc1', 'doc2', 'doc3', 'doc4'].map((key, idx) => {
+                const isFound = inventoryDocs.includes(key);
+                const doc = SECRET_DOCS_META[key];
+                return (
+                  <div
+                    key={key}
+                    className={`doc-slot ${isFound ? 'found' : ''}`}
+                    style={{ padding: '14px 16px' }}
+                    onClick={() => { if (isFound) openDocumentReader(doc); }}
+                  >
+                    <div>
+                      <div style={{ fontSize: '0.95rem', fontWeight: 'bold' }}>
+                        {isFound ? `${doc.code}: ${doc.title}` : `Засекреченная запись Б.И.Г. #0${idx + 1}`}
+                      </div>
+                      <div style={{ fontSize: '0.8rem', opacity: 0.8, marginTop: '4px' }}>
+                        {isFound ? doc.cipherFragment : 'Местонахождение неизвестно. Осматривайте предметы на сценах секторов.'}
+                      </div>
+                    </div>
+                    <span className="btn" style={{ pointerEvents: 'none', opacity: isFound ? 1 : 0.4 }}>
+                      {isFound ? 'Прочитать' : 'Пусто'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: '20px', textAlign: 'right' }}>
+              <button className="btn" onClick={() => setInventoryModalOpen(false)}>Закрыть инвентарь</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === 'settings' && (
+        <main style={{ maxWidth: '560px', margin: '50px auto', background: 'var(--bg-panel)', padding: '32px', border: '1px solid var(--border)', position: 'relative', zIndex: 5 }}>
+          <h2 style={{ marginBottom: '20px', fontWeight: 'normal', letterSpacing: '2px' }}>НАСТРОЙКИ ТЕРМИНАЛА</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '14px 0', borderBottom: '1px solid #24241e' }}>
+            <label>Яркость экрана ({Math.round(brightness * 100)}%)</label>
+            <input type="range" min="0.5" max="1.4" step="0.05" value={brightness} onChange={e => setBrightness(parseFloat(e.target.value))} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '14px 0', borderBottom: '1px solid #24241e' }}>
+            <label>Пространственный стереозвук и суб-дрон</label>
+            <button className="btn" onClick={toggleSound}>{soundEnabled ? 'Включён' : 'Выключен'}</button>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '14px 0', borderBottom: '1px solid #24241e' }}>
+            <label>Субтитры событий</label>
+            <button className="btn" onClick={() => setSubtitlesEnabled(!subtitlesEnabled)}>{subtitlesEnabled ? 'Включены' : 'Выключены'}</button>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '14px 0', borderBottom: '1px solid #24241e' }}>
+            <label>ЭЛТ-развёртка и шум</label>
+            <button className="btn" onClick={() => setReducedEffects(!reducedEffects)}>{reducedEffects ? 'Отключены' : 'Активны'}</button>
+          </div>
+          <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+            <button className="btn" onClick={() => resetProgress(false)}>Сбросить текущую сессию</button>
+            <button
+              className="btn"
+              style={{ borderColor: '#5e2a2e', color: '#e6b8bc' }}
+              onClick={() => {
+                safeStorage.remove('backrooms_endings');
+                setUnlockedEndings([]);
+                triggerSubtitle('[Штампы в Досье субъекта очищены]');
+              }}
+            >
+              Очистить Досье (0/7)
+            </button>
+            <button className="btn" onClick={() => setScreen('main')}>Назад в меню</button>
+          </div>
+        </main>
+      )}
+
+      {subtitleText && <div className="subtitle-toast">{subtitleText}</div>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
